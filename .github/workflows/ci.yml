@@ -125,7 +125,9 @@ jobs:
       - name: build for x86_64-unknown-linux-musl
         run: cargo build --all-features --target x86_64-unknown-linux-musl
 
-  # The oldest compiler the manifest claims to support.
+  # The oldest compiler the manifest claims to support. Dependencies resolve
+  # fresh here (no lockfile is committed); the edition's resolver prefers
+  # versions whose own `rust-version` this compiler meets.
   msrv:
     runs-on: ubuntu-latest
     steps:
@@ -154,7 +156,8 @@ jobs:
             exit 1
           fi
 
-  # Known advisories against the locked dependency tree (RustSec). Not a
+  # Known advisories (RustSec) against the dependency tree as it resolves
+  # today: no lockfile is committed, so one is generated first. Not a
   # required check: a new advisory can turn it red on a pull request that
   # changed nothing, and that should be seen, not block an unrelated merge.
   audit:
@@ -162,7 +165,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: taiki-e/install-action@cargo-audit
+
+      - name: resolve dependencies
+        run: cargo generate-lockfile
 
       - name: cargo audit
         run: cargo audit

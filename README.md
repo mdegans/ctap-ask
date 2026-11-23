@@ -304,6 +304,10 @@ CTAP2's PIN protocol requires AES, so `aes` and `cbc` are expected in a
 crate that never encrypts anything of its own. All cryptography is from
 the RustCrypto project.
 
+`Cargo.lock` is not committed, as usual for a library: CI and anyone who
+depends on the crate resolve its dependencies fresh, and a `cargo audit`
+job checks that resolution against the RustSec advisories.
+
 **There is no OpenSSL.** `cargo tree -i openssl-sys --all-features --target all`
 finds no such package, and CI fails if one appears.
 
