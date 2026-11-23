@@ -394,7 +394,10 @@ pub(crate) mod tests {
         let auth = AuthenticatorSide::new(protocol, &auth_secret, &shared.platform_cose);
         assert_eq!(shared.aes_key(), &auth.aes_key[..]);
 
-        let token = [0x5au8; 32];
+        // A fresh token each run: the fixed bytes are the known-answer
+        // tests' business, and a round trip should hold for any token.
+        let mut token = [0u8; 32];
+        crate::random::fill(&mut token).unwrap();
         let got = shared.decrypt(&auth.encrypt(&token)).unwrap();
         assert_eq!(&got[..], &token[..]);
 
@@ -407,12 +410,25 @@ pub(crate) mod tests {
         );
         assert_eq!(auth.decrypt(&enc).unwrap(), pin16);
         assert_eq!(&shared.decrypt(&enc).unwrap()[..], &pin16[..]);
+
+        // authenticate(): HMAC-SHA-256 of the message under the token,
+        // the first 16 bytes of it under protocol 1.
+        let tk = PinToken::new(protocol, Zeroizing::new(token.to_vec()), true);
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&token).unwrap();
+        mac.update(&[1u8; 32]);
+        let full = mac.finalize().into_bytes();
+        let param = tk.auth_param(&[1u8; 32]);
+        match protocol {
+            PinProtocol::One => assert_eq!(param, full[..16]),
+            PinProtocol::Two => assert_eq!(param, full[..]),
+        }
     }
 
     /// authenticate() is HMAC-SHA-256 under the token; protocol 1 sends the
-    /// first 16 bytes of what protocol 2 sends whole. The HMAC itself is
-    /// held to outside bytes in `known_answer_pin_hash_and_authenticate`,
-    /// and the in-memory key checks the parameter end to end.
+    /// first 16 bytes of what protocol 2 sends whole. Beside the round
+    /// trip's own HMAC above and the outside bytes in
+    /// `known_answer_pin_hash_and_authenticate`, this relates the two
+    /// protocols to each other.
     #[test]
     fn protocol_one_authenticates_with_the_first_half_of_protocol_twos() {
         let token = Zeroizing::new(vec![0x5au8; 32]);
