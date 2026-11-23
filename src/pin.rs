@@ -11,7 +11,7 @@ use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::No
 use ciborium::value::Value;
 use hmac::{Hmac, Mac};
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey, ecdh::EphemeralSecret};
+use p256::{EncodedPoint, PublicKey, SecretKey};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -169,6 +169,25 @@ impl fmt::Debug for PinToken {
     }
 }
 
+/// The protocol's key derivation from the ECDH shared point's x coordinate
+/// (CTAP 2.1 §6.5.6, §6.5.7). Protocol 1: SHA-256, one 32-byte key for
+/// both uses. Protocol 2: HKDF-SHA-256 with a zero salt, the HMAC key then
+/// the AES key.
+fn kdf(protocol: PinProtocol, zx: &[u8]) -> Zeroizing<Vec<u8>> {
+    match protocol {
+        PinProtocol::One => Zeroizing::new(Sha256::digest(zx).to_vec()),
+        PinProtocol::Two => {
+            let hk = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), zx);
+            let mut k = Zeroizing::new(vec![0u8; 64]);
+            hk.expand(b"CTAP2 HMAC key", &mut k[..32])
+                .expect("32 bytes is a valid HKDF-SHA-256 output length");
+            hk.expand(b"CTAP2 AES key", &mut k[32..])
+                .expect("32 bytes is a valid HKDF-SHA-256 output length");
+            k
+        }
+    }
+}
+
 /// The platform's half of the key agreement: the shared secret and the
 /// public key to send.
 pub(crate) struct Shared {
@@ -199,25 +218,18 @@ impl Shared {
         Ok(Self::derive(protocol, &peer))
     }
 
-    /// The platform side of ECDH and the protocol's KDF.
+    /// The platform side of ECDH and the protocol's KDF, with a new
+    /// secret that is used for this one agreement and dropped (zeroed).
     fn derive(protocol: PinProtocol, peer: &PublicKey) -> Self {
-        let secret = EphemeralSecret::random(&mut OsRng);
-        let ours = secret.public_key().to_encoded_point(false);
-        let z = secret.diffie_hellman(peer);
-        let zx = z.raw_secret_bytes();
+        Self::derive_with(protocol, &SecretKey::random(&mut OsRng), peer)
+    }
 
-        let key = match protocol {
-            PinProtocol::One => Zeroizing::new(Sha256::digest(zx.as_slice()).to_vec()),
-            PinProtocol::Two => {
-                let hk = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), zx.as_slice());
-                let mut k = Zeroizing::new(vec![0u8; 64]);
-                hk.expand(b"CTAP2 HMAC key", &mut k[..32])
-                    .expect("32 bytes is a valid HKDF-SHA-256 output length");
-                hk.expand(b"CTAP2 AES key", &mut k[32..])
-                    .expect("32 bytes is a valid HKDF-SHA-256 output length");
-                k
-            }
-        };
+    /// [`Self::derive`] with the platform's secret given, so that tests
+    /// can hold the agreement to fixed vectors.
+    fn derive_with(protocol: PinProtocol, secret: &SecretKey, peer: &PublicKey) -> Self {
+        let ours = secret.public_key().to_encoded_point(false);
+        let z = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+        let key = kdf(protocol, z.raw_secret_bytes().as_slice());
         let platform_cose = Value::Map(vec![
             (int(1), int(2)),
             (int(3), int(-25)),
@@ -292,7 +304,6 @@ impl Shared {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use p256::SecretKey;
 
     /// The authenticator's side of the key agreement, written from the
     /// specification independently of `Shared::derive`: its AES and HMAC
@@ -392,6 +403,121 @@ pub(crate) mod tests {
             PinProtocol::One => assert_eq!(param, full[..16]),
             PinProtocol::Two => assert_eq!(param, full[..]),
         }
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Known answers. None of these values was produced by this crate or by
+    // the libraries it uses: the key pairs and the shared secret are the
+    // ECDH example of RFC 5903 section 8.1 (checked with Python's
+    // `cryptography`), the derived keys and MACs are from Python's
+    // `hashlib` and `hmac`, and the ciphertexts are from the `openssl enc`
+    // command. They hold the PIN protocols to the same bytes across any
+    // change of cryptography library.
+    const I_SECRET: &str = "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433";
+    const I_X: &str = "dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c3772581180";
+    const I_Y: &str = "5271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3";
+    const R_SECRET: &str = "c6ef9c5d78ae012a011164acb397ce2088685d8f06bf9be0b283ab46476bee53";
+    const R_X: &str = "d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf63";
+    const R_Y: &str = "56fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab";
+    const Z_X: &str = "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de";
+    /// SHA-256(Z_X).
+    const P1_KEY: &str = "0519dc09b36efad1d00aef1d5b53b100202eb910b5de0dede75f190a357a367d";
+    /// HKDF-SHA-256(salt = 32 zero bytes, Z_X, "CTAP2 HMAC key" / "CTAP2 AES key").
+    const P2_HMAC_KEY: &str = "b9111d382554aa6ba0a8704b14ba83e59260204b3ed2e08bf1c887602f9d4636";
+    const P2_AES_KEY: &str = "41c8213da7d845552c23da07f946f6fe28951e81f62e2103043af94b29fe1b18";
+    /// AES-256-CBC of 32 bytes of 0x5a: under P1_KEY with a zero IV, and
+    /// under P2_AES_KEY with an IV of sixteen 0x07.
+    const P1_TOKEN_ENC: &str = "f0ec24242ef3abf8502e419eef7524b4aac48ecc4e9a4c9a0e77444266fa0533";
+    const P2_TOKEN_ENC: &str = "c9cc8406c071c5552a4f56fd29f4a4bc9e514d61a282f6325c72dfd27087f63b";
+    /// LEFT(SHA-256("123456"), 16), and its AES-256-CBC under P1_KEY.
+    const PIN_HASH: &str = "8d969eef6ecad3c29a3a629280e686cf";
+    const P1_PIN_HASH_ENC: &str = "2a23077691af8a3acbed0a2036e3d983";
+    /// HMAC-SHA-256(key = 32 bytes of 0x5a, message = 32 bytes of 0x01).
+    const AUTH: &str = "72cae8124ea45ae7b63b314a66d448053d3375778535099a2744b4016e50aebb";
+
+    /// The platform as party i of RFC 5903, the key as party r.
+    fn known(protocol: PinProtocol) -> Shared {
+        let secret = SecretKey::from_slice(&unhex(I_SECRET)).unwrap();
+        let cose = Value::Map(vec![
+            (int(-2), Value::Bytes(unhex(R_X))),
+            (int(-3), Value::Bytes(unhex(R_Y))),
+        ]);
+        let resp = Value::Map(vec![(int(1), cose)]);
+        // The same parsing of the key's public key as the real path.
+        let x = map_get(map_get(&resp, 1).unwrap(), -2)
+            .and_then(bytes)
+            .unwrap();
+        let y = map_get(map_get(&resp, 1).unwrap(), -3)
+            .and_then(bytes)
+            .unwrap();
+        let point = EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
+        let peer = PublicKey::from_encoded_point(&point).unwrap();
+        Shared::derive_with(protocol, &secret, &peer)
+    }
+
+    #[test]
+    fn known_answer_ecdh_and_key_derivation() {
+        // Protocol 1: one key, SHA-256 of the shared x coordinate.
+        let one = known(PinProtocol::One);
+        assert_eq!(one.key[..], unhex(P1_KEY)[..]);
+        assert_eq!(one.aes_key(), &unhex(P1_KEY)[..]);
+        // Protocol 2: the HMAC key, then the AES key.
+        let two = known(PinProtocol::Two);
+        assert_eq!(two.key[..32], unhex(P2_HMAC_KEY)[..]);
+        assert_eq!(two.aes_key(), &unhex(P2_AES_KEY)[..]);
+        // The public key sent to the authenticator is the secret's.
+        for shared in [&one, &two] {
+            let cose = &shared.platform_cose;
+            assert_eq!(map_get(cose, -2).and_then(bytes).unwrap(), unhex(I_X));
+            assert_eq!(map_get(cose, -3).and_then(bytes).unwrap(), unhex(I_Y));
+            // kty EC2, alg ECDH-ES+HKDF-256, crv P-256.
+            assert_eq!(map_get(cose, 1), Some(&int(2)));
+            assert_eq!(map_get(cose, 3), Some(&int(-25)));
+            assert_eq!(map_get(cose, -1), Some(&int(1)));
+        }
+        // The derivation alone, from the shared x coordinate.
+        assert_eq!(kdf(PinProtocol::One, &unhex(Z_X))[..], unhex(P1_KEY)[..]);
+        let both = [unhex(P2_HMAC_KEY), unhex(P2_AES_KEY)].concat();
+        assert_eq!(kdf(PinProtocol::Two, &unhex(Z_X))[..], both[..]);
+        // And the other party arrives at the same secret.
+        let r = SecretKey::from_slice(&unhex(R_SECRET)).unwrap();
+        let side = AuthenticatorSide::new(PinProtocol::Two, &r, &two.platform_cose);
+        assert_eq!(side.aes_key, unhex(P2_AES_KEY));
+    }
+
+    #[test]
+    fn known_answer_aes_cbc() {
+        let token = [0x5au8; 32];
+        // Protocol 1 has a zero IV, so encryption is a fixed function.
+        let one = known(PinProtocol::One);
+        assert_eq!(one.encrypt(&token), unhex(P1_TOKEN_ENC));
+        assert_eq!(one.encrypt(&unhex(PIN_HASH)), unhex(P1_PIN_HASH_ENC));
+        assert_eq!(one.decrypt(&unhex(P1_TOKEN_ENC)).unwrap()[..], token[..]);
+        // Protocol 2 sends a random IV first: decrypt a known ciphertext,
+        // and check what it encrypts decrypts under the known key.
+        let two = known(PinProtocol::Two);
+        let wire = [vec![7u8; 16], unhex(P2_TOKEN_ENC)].concat();
+        assert_eq!(two.decrypt(&wire).unwrap()[..], token[..]);
+        let sent = two.encrypt(&token);
+        assert_eq!(sent.len(), 48);
+        assert_eq!(two.decrypt(&sent).unwrap()[..], token[..]);
+    }
+
+    #[test]
+    fn known_answer_pin_hash_and_authenticate() {
+        let pin = Pin::new(Zeroizing::new("123456".into())).unwrap();
+        assert_eq!(pin.hash16()[..], unhex(PIN_HASH)[..]);
+        let token = Zeroizing::new(vec![0x5au8; 32]);
+        let two = PinToken::new(PinProtocol::Two, token.clone(), true);
+        assert_eq!(two.auth_param(&[1u8; 32]), unhex(AUTH));
+        let one = PinToken::new(PinProtocol::One, token, false);
+        assert_eq!(one.auth_param(&[1u8; 32]), unhex(AUTH)[..16]);
     }
 
     #[test]
