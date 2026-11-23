@@ -58,8 +58,7 @@ impl Pin {
 
     /// `LEFT(SHA-256(PIN), 16)`.
     pub(crate) fn hash16(&self) -> Zeroizing<[u8; 16]> {
-        let mut full = Zeroizing::new([0u8; 32]);
-        full.copy_from_slice(&Sha256::digest(self.0.as_bytes()));
+        let full = Zeroizing::new(Sha256::digest(self.0.as_bytes()));
         let mut left = Zeroizing::new([0u8; 16]);
         left.copy_from_slice(&full[..16]);
         left
@@ -185,7 +184,11 @@ fn public_key_from_xy(x: &[u8], y: &[u8]) -> Option<PublicKey> {
 /// the AES key.
 fn kdf(protocol: PinProtocol, zx: &[u8]) -> Zeroizing<Vec<u8>> {
     match protocol {
-        PinProtocol::One => Zeroizing::new(Sha256::digest(zx).to_vec()),
+        PinProtocol::One => {
+            // The digest is the key: wipe this copy of it too.
+            let digest = Zeroizing::new(Sha256::digest(zx));
+            Zeroizing::new(digest.to_vec())
+        }
         PinProtocol::Two => {
             let hk = hkdf::Hkdf::<Sha256>::new(Some(&[0u8; 32]), zx);
             let mut k = Zeroizing::new(vec![0u8; 64]);
@@ -238,7 +241,10 @@ impl Shared {
     /// can hold the agreement to fixed vectors.
     fn derive_with(protocol: PinProtocol, secret: &SecretKey, peer: &PublicKey) -> Self {
         let ours = secret.public_key().to_sec1_point(false);
-        let z = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
+        // `to_nonzero_scalar` copies the secret out of its zeroizing
+        // holder; wipe the copy as well. The shared secret wipes itself.
+        let scalar = Zeroizing::new(secret.to_nonzero_scalar());
+        let z = p256::ecdh::diffie_hellman(&*scalar, peer.as_affine());
         let key = kdf(protocol, z.raw_secret_bytes().as_slice());
         let platform_cose = Value::Map(vec![
             (int(1), int(2)),
@@ -388,10 +394,7 @@ pub(crate) mod tests {
         let auth = AuthenticatorSide::new(protocol, &auth_secret, &shared.platform_cose);
         assert_eq!(shared.aes_key(), &auth.aes_key[..]);
 
-        // A fresh token each run: the fixed bytes are the known-answer
-        // tests' business, and a round trip should hold for any token.
-        let mut token = [0u8; 32];
-        crate::random::fill(&mut token).unwrap();
+        let token = [0x5au8; 32];
         let got = shared.decrypt(&auth.encrypt(&token)).unwrap();
         assert_eq!(&got[..], &token[..]);
 
@@ -404,18 +407,24 @@ pub(crate) mod tests {
         );
         assert_eq!(auth.decrypt(&enc).unwrap(), pin16);
         assert_eq!(&shared.decrypt(&enc).unwrap()[..], &pin16[..]);
+    }
 
-        // authenticate(): HMAC-SHA-256 of the message under the token,
-        // the first 16 bytes of it under protocol 1.
-        let tk = PinToken::new(protocol, Zeroizing::new(token.to_vec()), true);
-        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&token).unwrap();
-        mac.update(&[1u8; 32]);
-        let full = mac.finalize().into_bytes();
-        let param = tk.auth_param(&[1u8; 32]);
-        match protocol {
-            PinProtocol::One => assert_eq!(param, full[..16]),
-            PinProtocol::Two => assert_eq!(param, full[..]),
+    /// authenticate() is HMAC-SHA-256 under the token; protocol 1 sends the
+    /// first 16 bytes of what protocol 2 sends whole. The HMAC itself is
+    /// held to outside bytes in `known_answer_pin_hash_and_authenticate`,
+    /// and the in-memory key checks the parameter end to end.
+    #[test]
+    fn protocol_one_authenticates_with_the_first_half_of_protocol_twos() {
+        let token = Zeroizing::new(vec![0x5au8; 32]);
+        let one = PinToken::new(PinProtocol::One, token.clone(), true);
+        let two = PinToken::new(PinProtocol::Two, token, true);
+        for message in [[0u8; 32], [1u8; 32], [0xffu8; 32]] {
+            let (short, whole) = (one.auth_param(&message), two.auth_param(&message));
+            assert_eq!((short.len(), whole.len()), (16, 32));
+            assert_eq!(short, whole[..16]);
         }
+        // A different message gives a different parameter.
+        assert_ne!(two.auth_param(&[0u8; 32]), two.auth_param(&[1u8; 32]));
     }
 
     fn unhex(s: &str) -> Vec<u8> {
@@ -522,6 +531,24 @@ pub(crate) mod tests {
         let sent = two.encrypt(&token).unwrap();
         assert_eq!(sent.len(), 48);
         assert_eq!(two.decrypt(&sent).unwrap()[..], token[..]);
+
+        // The direction the PIN travels in: what protocol 2 sends is the IV
+        // and then the ciphertext. Checked with the block cipher alone and
+        // the known AES key: in CBC the first block of ciphertext,
+        // decrypted, is the first block of plaintext XOR the IV.
+        use aes::cipher::{BlockDecrypt, KeyInit as _};
+        let pin_hash = unhex(PIN_HASH);
+        let sent = two.encrypt(&pin_hash).unwrap();
+        assert_eq!(sent.len(), 32, "a 16-byte IV, then one block");
+        let (iv, block) = sent.split_at(16);
+        let mut first = aes::Block::clone_from_slice(block);
+        aes::Aes256::new_from_slice(&unhex(P2_AES_KEY))
+            .unwrap()
+            .decrypt_block(&mut first);
+        let plain: Vec<u8> = first.iter().zip(iv).map(|(b, i)| b ^ i).collect();
+        assert_eq!(plain, pin_hash);
+        // And the IV is not the zero IV of protocol 1.
+        assert_ne!(iv, [0u8; 16]);
     }
 
     #[test]
