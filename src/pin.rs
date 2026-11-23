@@ -388,7 +388,10 @@ pub(crate) mod tests {
         let auth = AuthenticatorSide::new(protocol, &auth_secret, &shared.platform_cose);
         assert_eq!(shared.aes_key(), &auth.aes_key[..]);
 
-        let token = [0x5au8; 32];
+        // A fresh token each run: the fixed bytes are the known-answer
+        // tests' business, and a round trip should hold for any token.
+        let mut token = [0u8; 32];
+        crate::random::fill(&mut token).unwrap();
         let got = shared.decrypt(&auth.encrypt(&token)).unwrap();
         assert_eq!(&got[..], &token[..]);
 
