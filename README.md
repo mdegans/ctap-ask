@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/mdegans/ctap-ask/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mdegans/ctap-ask/actions/workflows/ci.yml?query=branch%3Amain)
 [![codecov](https://codecov.io/gh/mdegans/ctap-ask/graph/badge.svg)](https://codecov.io/gh/mdegans/ctap-ask)
-[![license](https://img.shields.io/github/license/mdegans/ctap-ask.svg)](https://github.com/mdegans/ctap-ask/blob/main/LICENSE)
+[![crates.io](https://img.shields.io/crates/v/ctap-ask.svg)](https://crates.io/crates/ctap-ask)
+[![docs.rs](https://docs.rs/ctap-ask/badge.svg)](https://docs.rs/ctap-ask)
+[![license](https://img.shields.io/crates/l/ctap-ask.svg)](https://github.com/mdegans/ctap-ask/blob/main/LICENSE)
 
 Ask a FIDO2 security key to sign, and nothing else.
 

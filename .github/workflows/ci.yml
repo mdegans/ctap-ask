@@ -154,6 +154,19 @@ jobs:
             exit 1
           fi
 
+  # Known advisories against the locked dependency tree (RustSec). Not a
+  # required check: a new advisory can turn it red on a pull request that
+  # changed nothing, and that should be seen, not block an unrelated merge.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      - name: cargo audit
+        run: cargo audit
+
   # Prove the crate is publishable before it merges. Nothing is published.
   publish-dry-run:
     runs-on: ubuntu-latest
