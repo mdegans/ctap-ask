@@ -152,6 +152,12 @@ about keys in general.
   were verified independently against the credentials' public keys.
 - `up: true` sent explicitly was accepted (the crate always sends `up`).
 
+Those observations were made with version 0.1.1. Version 0.1.2 replaced
+the libraries behind the key agreement and the PIN protocols (see the
+changelog). Known-answer tests hold that code to the same bytes as before,
+but whether a real key still accepts a PIN token request from 0.1.2 is
+something only a run against a key shows.
+
 **Not yet observed:**
 
 - Linux at run time against a key. There, only device enumeration and the
