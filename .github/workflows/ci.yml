@@ -46,8 +46,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IGNORE: '(^|/)src/(bin/|hid\.rs$|unsupported\.rs$)'
-      # Empty until the repository has the secret; see the last two steps.
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,19 +65,17 @@ jobs:
       - name: summary
         run: cargo llvm-cov report --ignore-filename-regex "$IGNORE" --summary-only
 
-      # For the badge and the per-line view. Secret: CODECOV_TOKEN. With
-      # the secret set, a failed upload fails the job.
+      # For the badge and the per-line view. Secret: CODECOV_TOKEN. A missing
+      # or wrong token fails the job: an upload that quietly does not happen
+      # is how a badge goes stale. The one case skipped is a pull request
+      # from a fork, which GitHub gives no secrets, so it could never pass.
       - name: Upload coverage to Codecov
-        if: env.CODECOV_TOKEN != ''
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: codecov/codecov-action@v5
         with:
-          token: ${{ env.CODECOV_TOKEN }}
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
           fail_ci_if_error: true
-
-      - name: Say so when the upload was skipped
-        if: env.CODECOV_TOKEN == ''
-        run: echo "::warning::CODECOV_TOKEN is not set, so coverage was measured and gated but not uploaded to Codecov."
 
   # macOS builds hidapi's C backend and links IOKit. Nothing here opens a
   # key: this job proves it compiles and the unit tests pass there.
