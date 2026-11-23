@@ -145,6 +145,10 @@ impl<'a> AssertionRequest<'a> {
 
     /// Add a credential to the allow list. With an allow list, only the
     /// listed credentials can answer, and they need not be discoverable.
+    ///
+    /// A caller that knows which credential it means should always name
+    /// it: a key can hold several for one RP ID, and without an allow
+    /// list which of them answer depends on whether a PIN token is sent.
     pub fn allow_credential(mut self, id: impl Into<CredentialId>) -> Self {
         self.allow_list.push(id.into());
         self

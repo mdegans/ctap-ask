@@ -107,10 +107,8 @@ impl From<Refused> for Error {
 #[non_exhaustive]
 pub enum Error {
     /// No FIDO authenticator is connected (or none this user can see).
-    #[error(
-        "no FIDO authenticator found. Is the key plugged in? On Linux, a key this user has no \
-         permission for may not be listed"
-    )]
+    /// The message says what to check on the platform it was built for.
+    #[error("no FIDO authenticator found. {}", no_device_advice(Platform::CURRENT))]
     NoDevice,
 
     /// More than one is connected and the caller did not choose.
@@ -298,6 +296,48 @@ impl Error {
     }
 }
 
+/// The platforms whose advice differs when no authenticator is found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Platform {
+    Linux,
+    MacOs,
+    Windows,
+    Other,
+}
+
+impl Platform {
+    /// The platform this build is for.
+    pub(crate) const CURRENT: Platform = if cfg!(target_os = "linux") {
+        Platform::Linux
+    } else if cfg!(target_os = "macos") {
+        Platform::MacOs
+    } else if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Other
+    };
+}
+
+/// What to check when no authenticator is listed, on each platform.
+pub(crate) fn no_device_advice(os: Platform) -> &'static str {
+    match os {
+        Platform::Linux => {
+            "Check the key is plugged in. A key this user has no permission for may not be \
+             listed or cannot be opened: add a udev rule that tags it `TAG+=\"uaccess\"` (see \
+             the README), then unplug and replug it"
+        }
+        Platform::MacOs => {
+            "Check the key is plugged in, and that no other program (a browser in the middle \
+             of a passkey prompt, a key manager) is holding it"
+        }
+        Platform::Windows => {
+            "Windows is not supported yet: it needs the system WebAuthn API, which this crate \
+             does not use so far"
+        }
+        Platform::Other => "Check the key is plugged in",
+    }
+}
+
 fn retries_text(retries: Option<u32>) -> String {
     match retries {
         Some(n) => n.to_string(),
@@ -406,6 +446,34 @@ mod tests {
             retries: None,
         };
         assert!(e.to_string().ends_with("attempts left: unknown"));
+    }
+
+    #[test]
+    fn no_device_advice_is_the_platforms_own() {
+        let linux = no_device_advice(Platform::Linux);
+        assert!(linux.contains("udev") && linux.contains("uaccess"));
+        let mac = no_device_advice(Platform::MacOs);
+        assert!(mac.contains("plugged in") && mac.contains("holding it"));
+        let windows = no_device_advice(Platform::Windows);
+        assert!(windows.contains("not supported yet"));
+        // Linux advice is given on Linux only.
+        for os in [Platform::MacOs, Platform::Windows, Platform::Other] {
+            let advice = no_device_advice(os);
+            assert!(
+                !advice.contains("udev") && !advice.contains("Linux"),
+                "{os:?}"
+            );
+        }
+        // The error carries the advice for the platform it was built for.
+        let shown = Error::NoDevice.to_string();
+        assert!(shown.starts_with("no FIDO authenticator found. "));
+        assert!(shown.ends_with(no_device_advice(Platform::CURRENT)));
+        #[cfg(target_os = "linux")]
+        assert_eq!(Platform::CURRENT, Platform::Linux);
+        #[cfg(target_os = "macos")]
+        assert_eq!(Platform::CURRENT, Platform::MacOs);
+        #[cfg(windows)]
+        assert_eq!(Platform::CURRENT, Platform::Windows);
     }
 
     #[test]

@@ -117,23 +117,68 @@ turn on the `verify` feature: that is the server's job.
 
 ## Status
 
-**This crate has not yet exchanged a packet with a real security key.**
-Its tests run against an authenticator simulated in memory, written from
-the CTAP 2.1 specification. On real hardware only device enumeration and
-the permission-denied path have been run (Linux, two YubiKeys). Until
-someone runs the probe below against a key, these are unverified:
+The crate's tests run against an authenticator simulated in memory,
+written from the CTAP 2.1 specification. It has also been run against one
+real key. What follows is what was observed on that key, not a statement
+about keys in general.
 
-- that it interoperates with any real key at all;
-- **assertions without a touch** (`user_presence(false)`): the
-  specification allows them, but whether a given key (YubiKeys included)
-  honours `up: false`, with or without a PIN token, is the key's choice;
-- **PIN token lifetime**: how long a token lasts and whether a touched
-  assertion uses it up, which decides whether a PIN is needed once or
-  every time;
-- sending `up: true` explicitly, which the specification permits and
-  which some CTAP 2.0 keys might not like;
-- **macOS at run time**: it is built and unit-tested there in CI, and has
-  never opened a key there.
+**Observed**, with the probe below: a YubiKey 5 series, firmware 5.2.7
+(CTAP 2.0 and 2.1-PRE, PIN protocol 1 only, extensions `credProtect` and
+`hmac-secret`), on macOS over USB.
+
+- The crate built and ran on macOS, and `info` and every `matrix` row
+  returned as the specification describes.
+- A touch without a PIN gave an assertion with `UP=1 UV=0`.
+- **No touch and no PIN gave an assertion with `UP=0 UV=0`.** This key
+  honours `user_presence(false)`.
+- With a PIN token the assertion had `UV=1`, touched or not.
+- A PIN token was still accepted after a touched assertion. CTAP 2.1 says
+  a touch uses the token up; this firmware predates that, and a newer key
+  may differ.
+- With a PIN token and no allow list, the key returned several credentials
+  for the RP ID, and `get_next_assertion` walked them.
+- A credential created without `credProtect` was discoverable without the
+  PIN. Two created with `credProtect` level 2 appeared in a request with
+  no allow list only when a PIN token was sent.
+- A `credProtect` level 2 credential named in the allow list answered on
+  every row, including touch without a PIN (`UP=1 UV=0`) and no touch and
+  no PIN (`UP=0 UV=0`).
+- Signature counters were reported per credential and did not advance by
+  one per assertion. For the one credential followed across all seven
+  rows, the counter rose on every row, though not by one each time.
+- Four assertions (two ES256, two EdDSA) over the probe's own client data
+  were verified independently against the credentials' public keys.
+- `up: true` sent explicitly was accepted (the crate always sends `up`).
+
+**Not yet observed:**
+
+- Linux at run time against a key. There, only device enumeration and the
+  permission-denied path have run.
+- PIN protocol 2: the key above offers protocol 1 only, so protocol 2 has
+  met only the simulated authenticator.
+- Any other vendor's key, any other YubiKey firmware, and a key that
+  speaks final CTAP 2.1 (PIN tokens with permissions, a token used up by a
+  touch).
+- A credential with `credProtect` level 3.
+- A key with built-in user verification (a fingerprint reader).
+- Windows, which has no backend yet.
+
+## Notes for callers
+
+Two things the run above showed a caller must get right.
+
+**Always pass the credential id you mean.** A key can hold several
+credentials for one RP ID, and which of them answer a request with no
+allow list depends on how they were created and on whether a PIN token is
+sent: a protected (`credProtect`) credential is not discoverable without
+one. Keep the credential id from registration and name it with
+`AssertionRequest::allow_credential`, so that the same credential answers
+with and without the PIN.
+
+**Track the signature counter per credential.** Compare a counter only
+with the last value seen for the same credential, and expect it to rise,
+not to rise by one. Counters from different credentials on one key are
+not comparable.
 
 ## Platforms
 
@@ -175,8 +220,9 @@ may have no equivalent there.
 ## The probe
 
 `ctap-ask-probe` is a small command-line tool built on the public API. It
-answers the questions under [Status](#status) for a key you have: does it
-sign without a touch, and is the PIN needed once or every time?
+answers, for a key you have, the questions [Status](#status) answers for
+one: does it sign without a touch, and is the PIN needed once or every
+time?
 
 ```sh
 cargo build --release --features probe
@@ -213,7 +259,10 @@ not a failure.
 
 Row 4c prints the token's age, so a refusal there can be read as expiry or
 as consumption. For each row the table has the flags the key set (`UP`,
-`UV`), the signature counter and the key's status if it refused.
+`UV`), the signature counter, the id of the credential that answered
+(counters are per credential, so compare them only between rows that show
+the same one) and the key's status if it refused. When several credentials
+answer, the row shows the first and says how many there were.
 
 A passkey created by a browser often has *credProtect* level 2, which
 hides it from a request with neither a credential id nor user
