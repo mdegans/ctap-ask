@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: test
+        run: cargo test --all-features
+
+      # The library alone, as a dependent that turns nothing on gets it.
+      - name: test (no features)
+        run: cargo test
+
+      - name: docs
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  # Hold the tests to nearly all of the code that can run without a real
+  # security key. Left out of the number, because nothing here can run
+  # them: `src/hid.rs` (the HID device I/O), `src/unsupported.rs` (the
+  # Windows stub) and the probe binary. The summary is in the job's log.
+  coverage:
+    runs-on: ubuntu-latest
+    env:
+      IGNORE: '(^|/)src/(bin/|hid\.rs$|unsupported\.rs$)'
+      # Empty until the repository has the secret; see the last two steps.
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # The gate is here, not at Codecov: the job fails under 95% of lines
+      # whether or not the upload works.
+      - name: coverage (fails under 95% of lines)
+        run: >
+          cargo llvm-cov --all-features --ignore-filename-regex "$IGNORE"
+          --lcov --output-path lcov.info --fail-under-lines 95
+
+      - name: summary
+        run: cargo llvm-cov report --ignore-filename-regex "$IGNORE" --summary-only
+
+      # For the badge and the per-line view. Secret: CODECOV_TOKEN. With
+      # the secret set, a failed upload fails the job.
+      - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ env.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: true
+
+      - name: Say so when the upload was skipped
+        if: env.CODECOV_TOKEN == ''
+        run: echo "::warning::CODECOV_TOKEN is not set, so coverage was measured and gated but not uploaded to Codecov."
+
+  # macOS builds hidapi's C backend and links IOKit. Nothing here opens a
+  # key: this job proves it compiles and the unit tests pass there.
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --all-features
+
+      - name: test
+        run: cargo test --all-features
+
+  # Windows has no backend yet. The crate must still compile there and say
+  # so at run time, and the protocol tests do not need a device.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: test
+        run: cargo test --all-features
+
+  # "Pure Rust on Linux": a static musl build, probe included.
+  musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: build for x86_64-unknown-linux-musl
+        run: cargo build --all-features --target x86_64-unknown-linux-musl
+
+  # The oldest compiler the manifest claims to support.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.85
+
+      - name: build and test on the MSRV
+        run: cargo test --all-features
+
+  # The README says there is no OpenSSL; hold it to that, on every target
+  # and with every feature.
+  no-openssl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: openssl-sys and native-tls are absent from the dependency tree
+        run: |
+          tree=$(cargo tree --all-features --target all --edges normal,build --prefix none | sed 's/ (.*//' | sort -u)
+          echo "$tree"
+          if echo "$tree" | grep -E '^(openssl|openssl-sys|native-tls) '; then
+            echo "::error::ctap-ask must not depend on OpenSSL"
+            exit 1
+          fi
+
+  # Prove the crate is publishable before it merges. Nothing is published.
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
