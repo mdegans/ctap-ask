@@ -23,14 +23,38 @@ pub enum VerifyError {
     Signature(String),
 }
 
-/// A credential's public key: ES256 (P-256) or EdDSA (Ed25519).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The signature algorithm of a [`PublicKey`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum PublicKey {
-    /// ECDSA on P-256 with SHA-256.
+pub enum Algorithm {
+    /// ECDSA on P-256 with SHA-256 (COSE algorithm -7).
+    Es256,
+    /// Ed25519 (COSE algorithm -8).
+    EdDsa,
+}
+
+/// A credential's public key: ES256 (P-256) or EdDSA (Ed25519).
+///
+/// Opaque: which library holds the key is not part of this crate's API.
+/// [`PublicKey::algorithm`] and [`PublicKey::to_bytes`] say what it is.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PublicKey(Key);
+
+#[derive(Clone, PartialEq, Eq)]
+enum Key {
     Es256(p256::ecdsa::VerifyingKey),
-    /// Ed25519.
     EdDsa(ed25519_dalek::VerifyingKey),
+}
+
+impl std::fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PublicKey({:?}, {})",
+            self.algorithm(),
+            crate::cbor::hex(&self.to_bytes())
+        )
+    }
 }
 
 impl PublicKey {
@@ -53,14 +77,40 @@ impl PublicKey {
 
     fn p256(sec1: &[u8]) -> Result<Self, VerifyError> {
         p256::ecdsa::VerifyingKey::from_sec1_bytes(sec1)
-            .map(PublicKey::Es256)
+            .map(|k| PublicKey(Key::Es256(k)))
             .map_err(|e| VerifyError::PublicKey(format!("bad P-256 point: {e}")))
     }
 
     fn ed25519(key: &[u8; 32]) -> Result<Self, VerifyError> {
-        ed25519_dalek::VerifyingKey::from_bytes(key)
-            .map(PublicKey::EdDsa)
-            .map_err(|e| VerifyError::PublicKey(format!("bad Ed25519 key: {e}")))
+        let key = ed25519_dalek::VerifyingKey::from_bytes(key)
+            .map_err(|e| VerifyError::PublicKey(format!("bad Ed25519 key: {e}")))?;
+        // A small-order key "verifies" signatures nobody made: with the
+        // identity as the key, one fixed signature passes for every
+        // message. No authenticator has such a key.
+        if key.is_weak() {
+            return Err(VerifyError::PublicKey(
+                "Ed25519 key is a small-order point".into(),
+            ));
+        }
+        Ok(PublicKey(Key::EdDsa(key)))
+    }
+
+    /// The key's signature algorithm.
+    pub fn algorithm(&self) -> Algorithm {
+        match &self.0 {
+            Key::Es256(_) => Algorithm::Es256,
+            Key::EdDsa(_) => Algorithm::EdDsa,
+        }
+    }
+
+    /// The raw public key: for ES256 the 65-byte uncompressed SEC1 point
+    /// (`0x04 || X || Y`), for EdDSA the 32-byte key. [`PublicKey::parse`]
+    /// reads both forms back.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match &self.0 {
+            Key::Es256(k) => k.to_sec1_point(false).as_bytes().to_vec(),
+            Key::EdDsa(k) => k.to_bytes().to_vec(),
+        }
     }
 
     fn from_cose(v: &Value) -> Result<Self, VerifyError> {
@@ -97,6 +147,9 @@ impl PublicKey {
     /// Worth checking even when the key answered: under CTAP 2.1 an
     /// authenticator may answer a request it should not fully honour with
     /// a well-formed and deliberately invalid signature.
+    ///
+    /// Ed25519 is checked strictly (`verify_strict`): a signature whose `R`
+    /// is a small-order point is refused, as is a non-canonical one.
     pub fn verify(
         &self,
         authenticator_data: &AuthenticatorData,
@@ -104,18 +157,17 @@ impl PublicKey {
         signature: &Signature,
     ) -> Result<bool, VerifyError> {
         let msg = [authenticator_data.as_bytes(), &client_data.hash()].concat();
-        match self {
-            PublicKey::Es256(k) => {
+        match &self.0 {
+            Key::Es256(k) => {
                 use p256::ecdsa::signature::Verifier;
                 let sig = p256::ecdsa::Signature::from_der(signature.as_bytes())
                     .map_err(|e| VerifyError::Signature(format!("not valid DER: {e}")))?;
                 Ok(k.verify(&msg, &sig).is_ok())
             }
-            PublicKey::EdDsa(k) => {
-                use ed25519_dalek::Verifier;
+            Key::EdDsa(k) => {
                 let sig = ed25519_dalek::Signature::from_slice(signature.as_bytes())
                     .map_err(|e| VerifyError::Signature(format!("malformed EdDSA: {e}")))?;
-                Ok(k.verify(&msg, &sig).is_ok())
+                Ok(k.verify_strict(&msg, &sig).is_ok())
             }
         }
     }
@@ -195,6 +247,66 @@ mod tests {
                 Err(VerifyError::Signature(_))
             ));
         }
+    }
+
+    #[test]
+    fn a_key_says_what_it_is_and_gives_its_bytes_back() {
+        use p256::ecdsa::SigningKey;
+        use p256::elliptic_curve::Generate;
+        let point = SigningKey::generate().verifying_key().to_sec1_point(false);
+        let es = PublicKey::parse(point.as_bytes()).unwrap();
+        assert_eq!(es.algorithm(), Algorithm::Es256);
+        assert_eq!(es.to_bytes(), point.as_bytes());
+        assert_eq!(PublicKey::parse(&es.to_bytes()).unwrap(), es);
+
+        let raw = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let ed = PublicKey::parse(&raw).unwrap();
+        assert_eq!(ed.algorithm(), Algorithm::EdDsa);
+        assert_eq!(ed.to_bytes(), raw);
+        assert_eq!(PublicKey::parse(&ed.to_bytes()).unwrap(), ed);
+        assert_ne!(es, ed);
+        let shown = format!("{ed:?}");
+        assert!(shown.starts_with("PublicKey(EdDsa, ") && shown.len() == 17 + 64 + 1);
+    }
+
+    /// The identity point as an Ed25519 key, and the signature (R the
+    /// identity, s zero) that the non-strict check accepts under it for
+    /// every message: s·B = R + k·A holds as 0 = 0 + k·0.
+    #[test]
+    fn a_small_order_ed25519_key_is_refused() {
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let mut forged = [0u8; 64];
+        forged[0] = 1;
+        // The vector is real: the library's non-strict check accepts it,
+        // and its strict check does not.
+        let weak = ed25519_dalek::VerifyingKey::from_bytes(&identity).unwrap();
+        let sig = ed25519_dalek::Signature::from_bytes(&forged);
+        assert!(ed25519_dalek::Verifier::verify(&weak, b"any message", &sig).is_ok());
+        assert!(weak.verify_strict(b"any message", &sig).is_err());
+        // This crate refuses the key, raw or as a COSE key.
+        assert!(matches!(
+            PublicKey::parse(&identity),
+            Err(VerifyError::PublicKey(_))
+        ));
+        let as_cose = cose(vec![
+            (int(1), int(1)),
+            (int(-1), int(6)),
+            (int(-2), Value::Bytes(identity.to_vec())),
+        ]);
+        assert!(PublicKey::parse(&as_cose).is_err());
+        // And a signature with that small-order R is not a signature
+        // under an honest key either. (A small-order R that the
+        // non-strict check would accept under an honest key needs the
+        // private scalar arithmetic of a forger, which nothing in this
+        // crate's dependencies exposes; this checks the refusal only.)
+        let honest = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let pk = PublicKey::parse(&honest.verifying_key().to_bytes()).unwrap();
+        let ad = AuthenticatorData::parse(vec![9u8; 37]).unwrap();
+        let cd = ClientData::Hash([4u8; 32]);
+        assert!(!pk.verify(&ad, &cd, &signature(&forged)).unwrap());
     }
 
     #[test]
