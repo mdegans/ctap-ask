@@ -1,18 +1,33 @@
 # Changelog
 
-## 0.1.2
+## 0.2.0
 
 The cryptography libraries move a generation to clear a security
-advisory. **The minimum supported Rust version rises from 1.85 to 1.87.**
+advisory. **Breaking**, for users of the `verify` feature; **the minimum
+supported Rust version rises from 1.85 to 1.87.**
 
+- **Breaking (`verify`):** `PublicKey` is now an opaque struct. In 0.1.x it
+  was an enum whose variants held `p256` and `ed25519-dalek` types, so the
+  move to new versions of those would have changed this crate's API in a
+  patch release. `PublicKey::parse` and `PublicKey::verify` are unchanged;
+  `PublicKey::algorithm` (the new `Algorithm` enum) and
+  `PublicKey::to_bytes` replace matching on the variants. No type of a
+  dependency is in the public API any more, except the deliberate
+  re-export of `Zeroizing`; a test scans the source for it.
+- **MSRV 1.87:** every `crypto-bigint` release with the fix below requires
+  it.
 - RUSTSEC-2026-0387 (timing variability in `crypto-bigint` 0.5.5, under
   `p256` 0.13's ECDH with the key) is cleared: `p256` 0.14, and with it
-  `sha2` 0.11, `hmac` 0.13, `hkdf` 0.13 and, for the `verify` feature,
+  `sha2` 0.11, `hmac` 0.13, `hkdf` 0.13 and, for `verify`,
   `ed25519-dalek` 3. `rand_core` is replaced by `getrandom` 0.4. `aes` and
   `cbc` are unchanged. 0.1.0 and 0.1.1 carry the advisory.
-- MSRV 1.87: every `crypto-bigint` release with the fix requires it.
+- `verify`: Ed25519 signatures are checked strictly (`verify_strict`), and
+  a small-order Ed25519 public key is refused by `PublicKey::parse`.
 - `Error::Randomness`: the operating system gave no randomness, so nothing
   was sent. The libraries used before panicked in that case.
+- The `zeroize` features of `aes`, `cbc`, `hmac` and `sha2` are on, and
+  the copies of the agreement scalar and of the protocol 1 key digest are
+  wiped (`hkdf` has no such feature).
 - Known-answer tests hold the key agreement, both PIN protocols' key
   derivation, AES-256-CBC, the PIN hash and `authenticate()` to fixed
   bytes from implementations outside the dependency tree (RFC 5903's ECDH
@@ -20,8 +35,9 @@ advisory. **The minimum supported Rust version rises from 1.85 to 1.87.**
   pass unchanged on the new.
 - The README's observations on a real key were made with 0.1.1, before
   this change of libraries; "Status" says so.
-- `Cargo.lock` is no longer committed (this is a library), and CI's
-  `cargo audit` job resolves the dependencies before auditing them.
+- `Cargo.lock` is no longer committed (this is a library). CI's
+  `cargo audit` job resolves the dependencies before auditing them, and
+  the release workflow publishes with the lockfile its checks ran against.
 - CI: the Codecov upload now fails the job when its token is missing.
 
 ## 0.1.1

@@ -152,10 +152,10 @@ about keys in general.
   were verified independently against the credentials' public keys.
 - `up: true` sent explicitly was accepted (the crate always sends `up`).
 
-Those observations were made with version 0.1.1. Version 0.1.2 replaced
+Those observations were made with version 0.1.1. Version 0.2.0 replaced
 the libraries behind the key agreement and the PIN protocols (see the
 changelog). Known-answer tests hold that code to the same bytes as before,
-but whether a real key still accepts a PIN token request from 0.1.2 is
+but whether a real key still accepts a PIN token request from 0.2.0 is
 something only a run against a key shows.
 
 **Not yet observed:**
@@ -288,7 +288,7 @@ on its own.
 | Feature | Adds | Extra dependencies |
 |---|---|---|
 | (none) | the library | |
-| `verify` | `PublicKey`: check an assertion's signature | `ed25519-dalek`, `p256`'s `ecdsa` |
+| `verify` | `PublicKey`: check an assertion's signature (Ed25519 strictly) | `ed25519-dalek`, `p256`'s `ecdsa` |
 | `probe` | the `ctap-ask-probe` binary (implies `verify`) | `clap`, `rpassword`, `base64`, `anyhow` |
 
 ## Dependencies
@@ -308,8 +308,13 @@ The library depends directly on eleven crates:
 
 CTAP2's PIN protocol requires AES, so `aes` and `cbc` are expected in a
 crate that never encrypts anything of its own. All cryptography is from
-the RustCrypto project. The minimum supported Rust version is 1.87, which
-is what the fixed `crypto-bigint` (under `p256`) requires.
+the RustCrypto project, with their `zeroize` features on where they have
+one. The minimum supported Rust version is 1.87, which is what the fixed
+`crypto-bigint` (under `p256`) requires.
+
+No type of a dependency appears in the public API (a test scans for
+it), so a new version of one is not by itself a breaking change here. The
+one exception is `Zeroizing`, re-exported from `zeroize` on purpose.
 
 `Cargo.lock` is not committed, as usual for a library: CI and anyone who
 depends on the crate resolve its dependencies fresh, and a `cargo audit`
