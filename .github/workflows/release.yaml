@@ -100,11 +100,22 @@ jobs:
           components: rustfmt, clippy
           targets: x86_64-unknown-linux-musl
 
+      # No lockfile is committed (this is a library), so resolve one here,
+      # test against exactly it, and hand it to the publish job: what is
+      # published is then what was tested.
+      - run: cargo generate-lockfile
+
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test --all-features
-      - run: cargo test
-      - run: cargo build --all-features --target x86_64-unknown-linux-musl
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - run: cargo test --locked
+      - run: cargo build --locked --all-features --target x86_64-unknown-linux-musl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-lockfile
+          path: Cargo.lock
+          if-no-files-found: error
 
   publish:
     needs: [version, check]
@@ -123,10 +134,16 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
+      # The lockfile the check job tested against.
+      - uses: actions/download-artifact@v4
+        with:
+          name: tested-lockfile
+
+      # `--locked`: fail rather than publish against any other resolution.
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish
+        run: cargo publish --locked
 
   # Only after the publish, and in its own job: the publish job doesn't need to
   # write to the repository.
