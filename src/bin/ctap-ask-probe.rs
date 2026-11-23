@@ -217,7 +217,7 @@ fn cmd_info(devices: &[Device]) -> Result<()> {
 fn print_info(info: &Info) {
     for field in info.fields() {
         let rendered = match (field.key, info.aaguid, info.firmware_version) {
-            (0x03, Some(aaguid), _) => format_uuid(&aaguid),
+            (0x03, Some(aaguid), _) => dashed_hex(&aaguid),
             (0x0e, _, Some(n)) => format!(
                 "{n} (as bytes: {}.{}.{})",
                 (n >> 16) & 0xff,
@@ -251,7 +251,10 @@ fn print_info(info: &Info) {
     );
 }
 
-fn format_uuid(b: &[u8; 16]) -> String {
+/// The 8-4-4-4-12 form an AAGUID is usually written in. An AAGUID names
+/// the authenticator's model (every key of that model has the same one),
+/// not the key or its owner.
+fn dashed_hex(b: &[u8; 16]) -> String {
     let h = hex(b);
     format!(
         "{}-{}-{}-{}-{}",
@@ -797,8 +800,8 @@ mod tests {
     }
 
     #[test]
-    fn uuid_formatting() {
+    fn aaguid_formatting() {
         let b: [u8; 16] = core::array::from_fn(|i| i as u8);
-        assert_eq!(format_uuid(&b), "00010203-0405-0607-0809-0a0b0c0d0e0f");
+        assert_eq!(dashed_hex(&b), "00010203-0405-0607-0809-0a0b0c0d0e0f");
     }
 }
