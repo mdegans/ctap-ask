@@ -136,8 +136,9 @@ mod tests {
     #[test]
     fn es256_cose_and_raw_point_verify() {
         use p256::ecdsa::{SigningKey, signature::Signer};
-        let sk = SigningKey::random(&mut rand_core::OsRng);
-        let pt = sk.verifying_key().to_encoded_point(false);
+        use p256::elliptic_curve::Generate;
+        let sk = SigningKey::generate();
+        let pt = sk.verifying_key().to_sec1_point(false);
         let enc = cose(vec![
             (int(1), int(2)),
             (int(3), int(-7)),
@@ -170,7 +171,7 @@ mod tests {
     fn eddsa_cose_and_raw_key_verify() {
         use ed25519_dalek::{Signer, SigningKey};
         let mut seed = [0u8; 32];
-        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut seed);
+        getrandom::fill(&mut seed).unwrap();
         let sk = SigningKey::from_bytes(&seed);
         let raw = sk.verifying_key().to_bytes();
         let enc = cose(vec![
