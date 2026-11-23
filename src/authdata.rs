@@ -112,6 +112,9 @@ impl AuthenticatorData {
     }
 
     /// The signature counter. Zero on keys that do not keep one.
+    ///
+    /// Compare it only with the last value seen for the same credential:
+    /// a key may count per credential, and need not advance by one.
     pub fn sign_count(&self) -> u32 {
         u32::from_be_bytes([self.raw[33], self.raw[34], self.raw[35], self.raw[36]])
     }

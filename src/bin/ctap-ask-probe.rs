@@ -173,10 +173,8 @@ fn open_one(devices: &[Device], index: Option<usize>) -> Result<Authenticator> {
 
 fn cmd_info(devices: &[Device]) -> Result<()> {
     if devices.is_empty() {
-        println!("No FIDO authenticators found (HID usage page 0xF1D0).");
-        println!(
-            "If a key is plugged in: on Linux this usually means /dev/hidraw* is not readable by you; see the README."
-        );
+        // The library's message says what to check on this platform.
+        println!("{} (HID usage page 0xF1D0).", Error::NoDevice);
         return Ok(());
     }
     for (i, d) in devices.iter().enumerate() {
@@ -405,6 +403,28 @@ fn verify_str(t: &Prepared, o: &Outcome, a: &Assertion) -> String {
     }
 }
 
+/// The credential that answered, base64url. A key may leave the id out
+/// when the allow list had one entry; that entry is then the one.
+fn answering_credential(t: &Prepared, returned: Option<&CredentialId>) -> String {
+    returned
+        .map(CredentialId::as_bytes)
+        .or(t.credential_id.as_deref())
+        .map(|c| URL_SAFE_NO_PAD.encode(c))
+        .unwrap_or_else(|| "(none returned)".into())
+}
+
+/// What a matrix row says about an assertion that came back.
+fn assertion_result(asked_for_touch: bool, up: bool, credentials: Option<u32>) -> String {
+    if asked_for_touch && !up {
+        return "assertion (key asked for touch!)".into();
+    }
+    match credentials {
+        // The row shows the first; the counter and id are that one's.
+        Some(n) if n > 1 => format!("assertion (first of {n} credentials)"),
+        _ => "assertion".into(),
+    }
+}
+
 fn print_assertion(t: &Prepared, o: &Outcome, a: &Assertion, indent: &str) {
     let ad = &a.authenticator_data;
     println!("{indent}flags            {}", ad.flags());
@@ -417,14 +437,10 @@ fn print_assertion(t: &Prepared, o: &Outcome, a: &Assertion, indent: &str) {
             "DOES NOT MATCH SHA-256(rp id)"
         }
     );
-    let cred = a
-        .credential_id
-        .as_ref()
-        .map(CredentialId::as_bytes)
-        .or(t.credential_id.as_deref())
-        .map(|c| URL_SAFE_NO_PAD.encode(c))
-        .unwrap_or_else(|| "(none returned)".into());
-    println!("{indent}credential id    {cred}");
+    println!(
+        "{indent}credential id    {}",
+        answering_credential(t, a.credential_id.as_ref())
+    );
     match &a.user {
         Some(u) => println!(
             "{indent}user handle      {}{}",
@@ -548,6 +564,9 @@ struct Row {
     flags: String,
     counter: String,
     verified: String,
+    /// The credential that answered, base64url. Counters are compared
+    /// per credential, so each row says whose counter it shows.
+    credential: String,
 }
 
 impl Row {
@@ -560,6 +579,7 @@ impl Row {
             flags: "-".into(),
             counter: "-".into(),
             verified: "-".into(),
+            credential: "-".into(),
         }
     }
 }
@@ -583,11 +603,8 @@ fn row_from(
                 }
             }
             Ok(a) => {
-                row.result = if o.asked_for_touch && !up {
-                    "assertion (key asked for touch!)".into()
-                } else {
-                    "assertion".into()
-                };
+                row.result = assertion_result(o.asked_for_touch, up, a.number_of_credentials);
+                row.credential = answering_credential(t, a.credential_id.as_ref());
                 let flags = a.authenticator_data.flags();
                 row.flags = format!(
                     "UP={} UV={}",
@@ -659,16 +676,19 @@ fn cmd_matrix(key: &mut Authenticator, t: &Prepared) -> Result<()> {
     );
     let w = rows.iter().map(|r| r.label.len()).max().unwrap_or(10);
     println!(
-        "{:<w$} | {:<5} | {:<26} | {:<9} | {:<7} | {:<34} | signature",
-        "row", "up", "uv", "flags", "counter", "result"
+        "{:<w$} | {:<5} | {:<26} | {:<9} | {:<7} | {:<34} | {:<21} | credential",
+        "row", "up", "uv", "flags", "counter", "result", "signature"
     );
-    println!("{}", "-".repeat(w + 110));
+    println!("{}", "-".repeat(w + 136));
     for r in &rows {
         println!(
-            "{:<w$} | {:<5} | {:<26} | {:<9} | {:<7} | {:<34} | {}",
-            r.label, r.up, r.uv, r.flags, r.counter, r.result, r.verified
+            "{:<w$} | {:<5} | {:<26} | {:<9} | {:<7} | {:<34} | {:<21} | {}",
+            r.label, r.up, r.uv, r.flags, r.counter, r.result, r.verified, r.credential
         );
     }
+    println!(
+        "The counter in each row is that row's credential's: compare it only with rows that show the same credential."
+    );
     Ok(())
 }
 
@@ -797,6 +817,54 @@ mod tests {
         assert!(a.starts_with(r#"{"type":"ctap-ask.probe","challenge":""#));
         assert!(a.ends_with(r#"","origin":"example.org"}"#));
         assert_eq!(data, ClientData::Raw(a.into_bytes()));
+    }
+
+    #[test]
+    fn a_matrix_row_names_the_credential_that_answered() {
+        let prepared = |id: Option<Vec<u8>>| Prepared {
+            rp_id: "example.org".into(),
+            credential_id: id,
+            public_key: None,
+        };
+        let t = prepared(Some(vec![0xc1, 0xc2]));
+        // The key's own answer wins; the allow list's entry stands in when
+        // the key leaves the id out; with neither, the row says so.
+        let returned = CredentialId::from(vec![0xff, 0xef]);
+        assert_eq!(answering_credential(&t, Some(&returned)), "_-8");
+        assert_eq!(answering_credential(&t, None), "wcI");
+        assert_eq!(
+            answering_credential(&prepared(None), None),
+            "(none returned)"
+        );
+
+        // A row with no assertion has no credential to name.
+        let refused = Outcome {
+            client_data_json: String::new(),
+            client_data: ClientData::Hash([0; 32]),
+            result: Err(Error::NoDevice),
+            others: vec![],
+            asked_for_touch: false,
+        };
+        assert_eq!(
+            row_from("2", false, "none", Ok(refused), &t).credential,
+            "-"
+        );
+    }
+
+    #[test]
+    fn matrix_results_say_when_several_credentials_answered() {
+        assert_eq!(assertion_result(false, true, None), "assertion");
+        assert_eq!(assertion_result(false, true, Some(1)), "assertion");
+        assert_eq!(
+            assertion_result(false, false, Some(2)),
+            "assertion (first of 2 credentials)"
+        );
+        assert_eq!(
+            assertion_result(true, false, Some(2)),
+            "assertion (key asked for touch!)"
+        );
+        // It fits the table's column.
+        assert!(assertion_result(false, true, Some(9)).len() <= 34);
     }
 
     #[test]
