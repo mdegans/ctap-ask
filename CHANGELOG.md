@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.1.2
+
+The cryptography libraries move a generation to clear a security
+advisory. **The minimum supported Rust version rises from 1.85 to 1.87.**
+
+- RUSTSEC-2026-0387 (timing variability in `crypto-bigint` 0.5.5, under
+  `p256` 0.13's ECDH with the key) is cleared: `p256` 0.14, and with it
+  `sha2` 0.11, `hmac` 0.13, `hkdf` 0.13 and, for the `verify` feature,
+  `ed25519-dalek` 3. `rand_core` is replaced by `getrandom` 0.4. `aes` and
+  `cbc` are unchanged. 0.1.0 and 0.1.1 carry the advisory.
+- MSRV 1.87: every `crypto-bigint` release with the fix requires it.
+- `Error::Randomness`: the operating system gave no randomness, so nothing
+  was sent. The libraries used before panicked in that case.
+- Known-answer tests hold the key agreement, both PIN protocols' key
+  derivation, AES-256-CBC, the PIN hash and `authenticate()` to fixed
+  bytes from implementations outside the dependency tree (RFC 5903's ECDH
+  example among them). They were written against the old libraries and
+  pass unchanged on the new.
+- The README's observations on a real key were made with 0.1.1, before
+  this change of libraries; "Status" says so.
+- `Cargo.lock` is no longer committed (this is a library), and CI's
+  `cargo audit` job resolves the dependencies before auditing them.
+- CI: the Codecov upload now fails the job when its token is missing.
+
 ## 0.1.1
 
 What a real key showed. 0.1.0's README was written before the crate had
