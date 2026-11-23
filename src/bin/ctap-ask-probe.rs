@@ -13,7 +13,6 @@ use ctap_ask::{
     Assertion, AssertionRequest, Authenticator, ClientData, CredentialId, Device, Error, Info,
     Keepalive, Pin, PinToken, PublicKey,
 };
-use rand_core::{OsRng, RngCore};
 use std::time::Instant;
 use zeroize::Zeroizing;
 
@@ -133,7 +132,7 @@ impl Prepared {
 }
 
 fn decode_hex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     (0..s.len())
@@ -318,9 +317,10 @@ struct Outcome {
     asked_for_touch: bool,
 }
 
-fn client_data(rp_id: &str) -> (String, ClientData) {
+fn client_data(rp_id: &str) -> Result<(String, ClientData)> {
     let mut challenge = [0u8; 32];
-    OsRng.fill_bytes(&mut challenge);
+    getrandom::fill(&mut challenge)
+        .map_err(|e| anyhow!("no randomness from the operating system for a challenge: {e}"))?;
     // `rp_id` was checked to be a bare domain, and base64url has no
     // character JSON escapes.
     let json = format!(
@@ -328,7 +328,7 @@ fn client_data(rp_id: &str) -> (String, ClientData) {
         URL_SAFE_NO_PAD.encode(challenge)
     );
     let data = ClientData::Raw(json.clone().into_bytes());
-    (json, data)
+    Ok((json, data))
 }
 
 fn assert_once(
@@ -338,7 +338,7 @@ fn assert_once(
     token: Option<&PinToken>,
     built_in_uv: bool,
 ) -> Result<Outcome> {
-    let (client_data_json, client_data) = client_data(&t.rp_id);
+    let (client_data_json, client_data) = client_data(&t.rp_id)?;
     let mut request = AssertionRequest::new(t.rp_id.as_str(), client_data.clone())
         .user_presence(up)
         .built_in_uv(built_in_uv);
@@ -811,8 +811,8 @@ mod tests {
 
     #[test]
     fn client_data_is_json_and_fresh() {
-        let (a, data) = client_data("example.org");
-        let (b, _) = client_data("example.org");
+        let (a, data) = client_data("example.org").unwrap();
+        let (b, _) = client_data("example.org").unwrap();
         assert_ne!(a, b);
         assert!(a.starts_with(r#"{"type":"ctap-ask.probe","challenge":""#));
         assert!(a.ends_with(r#"","origin":"example.org"}"#));

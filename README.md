@@ -296,13 +296,14 @@ The library depends directly on eleven crates:
 | `p256` | ECDH with the key (PIN protocols) |
 | `aes`, `cbc` | AES-256-CBC (PIN protocols) |
 | `sha2`, `hmac`, `hkdf` | SHA-256, HMAC, HKDF (PIN protocols) |
-| `rand_core` | randomness from the operating system |
+| `getrandom` | randomness from the operating system |
 | `zeroize` | wiping the PIN and the token |
 | `thiserror` | the error type |
 
 CTAP2's PIN protocol requires AES, so `aes` and `cbc` are expected in a
 crate that never encrypts anything of its own. All cryptography is from
-the RustCrypto project.
+the RustCrypto project. The minimum supported Rust version is 1.87, which
+is what the fixed `crypto-bigint` (under `p256`) requires.
 
 `Cargo.lock` is not committed, as usual for a library: CI and anyone who
 depends on the crate resolve its dependencies fresh, and a `cargo audit`

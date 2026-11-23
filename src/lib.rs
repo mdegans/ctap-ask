@@ -72,6 +72,7 @@ mod device;
 mod error;
 mod info;
 mod pin;
+mod random;
 mod transport;
 
 #[cfg_attr(not(windows), path = "hid.rs")]

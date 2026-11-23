@@ -10,11 +10,11 @@ use crate::pin::PinProtocol;
 use crate::pin::tests::AuthenticatorSide;
 use crate::transport::{CborTransport, Keepalive};
 use ciborium::value::Value;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use p256::SecretKey;
 use p256::ecdsa::{SigningKey, signature::Signer};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
-use rand_core::{OsRng, RngCore};
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 
@@ -67,7 +67,7 @@ impl FakeKey {
             rp_id: "example.org".into(),
             credentials: vec![Credential {
                 id: vec![0xc1; 16],
-                key: SigningKey::random(&mut OsRng),
+                key: SigningKey::generate(),
                 user_id: b"user-1".to_vec(),
             }],
             pin: Some("123456".into()),
@@ -79,7 +79,7 @@ impl FakeKey {
             cred_protect: false,
             last_request: Arc::default(),
             log: Arc::default(),
-            agreement: SecretKey::random(&mut OsRng),
+            agreement: SecretKey::generate(),
             token: None,
             counter: 41,
             pending: vec![],
@@ -149,7 +149,7 @@ impl FakeKey {
                 encode(0, Some(&Value::Map(m)))
             }
             Some(2) => {
-                let pt = self.agreement.public_key().to_encoded_point(false);
+                let pt = self.agreement.public_key().to_sec1_point(false);
                 let cose = Value::Map(vec![
                     (int(1), int(2)),
                     (int(3), int(-25)),
@@ -173,7 +173,7 @@ impl FakeKey {
                     // As a real key does: one attempt gone, and a new key
                     // agreement key.
                     self.retries -= 1;
-                    self.agreement = SecretKey::random(&mut OsRng);
+                    self.agreement = SecretKey::generate();
                     return encode(if self.retries == 0 { 0x32 } else { 0x31 }, None);
                 }
                 let scope = if sub == 9 {
@@ -188,7 +188,7 @@ impl FakeKey {
                     None
                 };
                 let mut token = vec![0u8; 32];
-                OsRng.fill_bytes(&mut token);
+                getrandom::fill(&mut token).unwrap();
                 let enc = side.encrypt(&token);
                 self.token = Some((token, protocol, scope));
                 encode(0, Some(&Value::Map(vec![(int(2), Value::Bytes(enc))])))
@@ -220,7 +220,7 @@ impl FakeKey {
             let Some((token, protocol, scope)) = &self.token else {
                 return refuse(0x33);
             };
-            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(token).unwrap();
+            let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(token).unwrap();
             mac.update(cdh);
             let full = mac.finalize().into_bytes();
             let expected = match protocol {

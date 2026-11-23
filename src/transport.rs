@@ -7,7 +7,6 @@
 
 use crate::allow::Request;
 use crate::error::Error;
-use rand_core::{OsRng, RngCore};
 use std::time::{Duration, Instant};
 
 pub(crate) const PACKET: usize = 64;
@@ -121,7 +120,7 @@ impl<P: PacketIo> Ctaphid<P> {
             response_timeout,
         };
         let mut nonce = [0u8; 8];
-        OsRng.fill_bytes(&mut nonce);
+        crate::random::fill(&mut nonce)?;
         ch.write_message(CMD_INIT, &nonce)?;
         // Replies to INIT come on the broadcast channel, so another
         // program's reply can arrive here too. Ours carries our nonce.

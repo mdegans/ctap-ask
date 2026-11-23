@@ -9,10 +9,10 @@ use crate::cbor::{bytes, int, map_get};
 use crate::error::Error;
 use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
 use ciborium::value::Value;
-use hmac::{Hmac, Mac};
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey, SecretKey};
-use rand_core::{OsRng, RngCore};
+use hmac::{Hmac, KeyInit, Mac};
+use p256::elliptic_curve::Generate;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use p256::{PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -148,8 +148,8 @@ impl PinToken {
 
     /// `authenticate(pinUvAuthToken, clientDataHash)`.
     pub(crate) fn auth_param(&self, client_data_hash: &[u8; 32]) -> Vec<u8> {
-        let mut mac =
-            <HmacSha256 as Mac>::new_from_slice(&self.token).expect("HMAC takes any key length");
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&self.token)
+            .expect("HMAC takes any key length");
         mac.update(client_data_hash);
         let out = mac.finalize().into_bytes().to_vec();
         match self.protocol {
@@ -167,6 +167,16 @@ impl fmt::Debug for PinToken {
             self.protocol, self.scoped
         )
     }
+}
+
+/// A P-256 public key from its affine coordinates, if they are 32 bytes
+/// each and a point on the curve (the identity is not a public key).
+fn public_key_from_xy(x: &[u8], y: &[u8]) -> Option<PublicKey> {
+    if x.len() != 32 || y.len() != 32 {
+        return None;
+    }
+    // SEC1 uncompressed: 0x04 || X || Y.
+    PublicKey::from_sec1_bytes(&[&[0x04], x, y].concat()).ok()
 }
 
 /// The protocol's key derivation from the ECDH shared point's x coordinate
@@ -212,22 +222,22 @@ impl Shared {
         if x.len() != 32 || y.len() != 32 {
             return Err(bad("bad coordinate length"));
         }
-        let point = EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
-        let peer = Option::<PublicKey>::from(PublicKey::from_encoded_point(&point))
-            .ok_or_else(|| bad("the key is not a valid P-256 point"))?;
-        Ok(Self::derive(protocol, &peer))
+        let peer =
+            public_key_from_xy(x, y).ok_or_else(|| bad("the key is not a valid P-256 point"))?;
+        Self::derive(protocol, &peer)
     }
 
     /// The platform side of ECDH and the protocol's KDF, with a new
     /// secret that is used for this one agreement and dropped (zeroed).
-    fn derive(protocol: PinProtocol, peer: &PublicKey) -> Self {
-        Self::derive_with(protocol, &SecretKey::random(&mut OsRng), peer)
+    fn derive(protocol: PinProtocol, peer: &PublicKey) -> Result<Self, Error> {
+        let secret = SecretKey::try_generate().map_err(crate::random::randomness)?;
+        Ok(Self::derive_with(protocol, &secret, peer))
     }
 
     /// [`Self::derive`] with the platform's secret given, so that tests
     /// can hold the agreement to fixed vectors.
     fn derive_with(protocol: PinProtocol, secret: &SecretKey, peer: &PublicKey) -> Self {
-        let ours = secret.public_key().to_encoded_point(false);
+        let ours = secret.public_key().to_sec1_point(false);
         let z = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), peer.as_affine());
         let key = kdf(protocol, z.raw_secret_bytes().as_slice());
         let platform_cose = Value::Map(vec![
@@ -257,11 +267,12 @@ impl Shared {
         }
     }
 
-    /// Encrypt a whole number of AES blocks.
-    pub(crate) fn encrypt(&self, plain: &[u8]) -> Vec<u8> {
+    /// Encrypt a whole number of AES blocks. Protocol 2 needs a random IV,
+    /// which is the one way this can fail.
+    pub(crate) fn encrypt(&self, plain: &[u8]) -> Result<Vec<u8>, Error> {
         let mut iv = [0u8; 16];
         if self.protocol == PinProtocol::Two {
-            OsRng.fill_bytes(&mut iv);
+            crate::random::fill(&mut iv)?;
         }
         let mut buf = plain.to_vec();
         let len = buf.len();
@@ -269,10 +280,10 @@ impl Shared {
             .expect("a 32-byte key and a 16-byte IV")
             .encrypt_padded_mut::<NoPadding>(&mut buf, len)
             .expect("callers pass whole blocks");
-        match self.protocol {
+        Ok(match self.protocol {
             PinProtocol::One => buf,
             PinProtocol::Two => [&iv[..], &buf].concat(),
-        }
+        })
     }
 
     pub(crate) fn decrypt(&self, ct: &[u8]) -> Result<Zeroizing<Vec<u8>>, Error> {
@@ -321,8 +332,7 @@ pub(crate) mod tests {
         ) -> Self {
             let x = map_get(platform_cose, -2).and_then(bytes).unwrap();
             let y = map_get(platform_cose, -3).and_then(bytes).unwrap();
-            let pt = EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
-            let platform = PublicKey::from_encoded_point(&pt).unwrap();
+            let platform = public_key_from_xy(x, y).unwrap();
             let z = p256::ecdh::diffie_hellman(secret.to_nonzero_scalar(), platform.as_affine());
             let zx = z.raw_secret_bytes();
             let aes_key = match protocol {
@@ -373,8 +383,8 @@ pub(crate) mod tests {
     /// check that the platform side decrypts it and authenticates as the
     /// specification says.
     fn roundtrip(protocol: PinProtocol) {
-        let auth_secret = SecretKey::random(&mut OsRng);
-        let shared = Shared::derive(protocol, &auth_secret.public_key());
+        let auth_secret = SecretKey::generate();
+        let shared = Shared::derive(protocol, &auth_secret.public_key()).unwrap();
         let auth = AuthenticatorSide::new(protocol, &auth_secret, &shared.platform_cose);
         assert_eq!(shared.aes_key(), &auth.aes_key[..]);
 
@@ -384,7 +394,7 @@ pub(crate) mod tests {
 
         // What the platform encrypts (pinHashEnc), the authenticator reads.
         let pin16 = [3u8; 16];
-        let enc = shared.encrypt(&pin16);
+        let enc = shared.encrypt(&pin16).unwrap();
         assert_eq!(
             enc.len(),
             if protocol == PinProtocol::One { 16 } else { 32 }
@@ -395,7 +405,7 @@ pub(crate) mod tests {
         // authenticate(): HMAC-SHA-256 of the message under the token,
         // the first 16 bytes of it under protocol 1.
         let tk = PinToken::new(protocol, Zeroizing::new(token.to_vec()), true);
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(&token).unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(&token).unwrap();
         mac.update(&[1u8; 32]);
         let full = mac.finalize().into_bytes();
         let param = tk.auth_param(&[1u8; 32]);
@@ -456,8 +466,7 @@ pub(crate) mod tests {
         let y = map_get(map_get(&resp, 1).unwrap(), -3)
             .and_then(bytes)
             .unwrap();
-        let point = EncodedPoint::from_affine_coordinates(x.into(), y.into(), false);
-        let peer = PublicKey::from_encoded_point(&point).unwrap();
+        let peer = public_key_from_xy(x, y).unwrap();
         Shared::derive_with(protocol, &secret, &peer)
     }
 
@@ -496,15 +505,18 @@ pub(crate) mod tests {
         let token = [0x5au8; 32];
         // Protocol 1 has a zero IV, so encryption is a fixed function.
         let one = known(PinProtocol::One);
-        assert_eq!(one.encrypt(&token), unhex(P1_TOKEN_ENC));
-        assert_eq!(one.encrypt(&unhex(PIN_HASH)), unhex(P1_PIN_HASH_ENC));
+        assert_eq!(one.encrypt(&token).unwrap(), unhex(P1_TOKEN_ENC));
+        assert_eq!(
+            one.encrypt(&unhex(PIN_HASH)).unwrap(),
+            unhex(P1_PIN_HASH_ENC)
+        );
         assert_eq!(one.decrypt(&unhex(P1_TOKEN_ENC)).unwrap()[..], token[..]);
         // Protocol 2 sends a random IV first: decrypt a known ciphertext,
         // and check what it encrypts decrypts under the known key.
         let two = known(PinProtocol::Two);
         let wire = [vec![7u8; 16], unhex(P2_TOKEN_ENC)].concat();
         assert_eq!(two.decrypt(&wire).unwrap()[..], token[..]);
-        let sent = two.encrypt(&token);
+        let sent = two.encrypt(&token).unwrap();
         assert_eq!(sent.len(), 48);
         assert_eq!(two.decrypt(&sent).unwrap()[..], token[..]);
     }
@@ -532,22 +544,25 @@ pub(crate) mod tests {
 
     #[test]
     fn protocol_two_uses_a_fresh_iv_each_time() {
-        let secret = SecretKey::random(&mut OsRng);
-        let shared = Shared::derive(PinProtocol::Two, &secret.public_key());
-        assert_ne!(shared.encrypt(&[3u8; 16]), shared.encrypt(&[3u8; 16]));
+        let secret = SecretKey::generate();
+        let shared = Shared::derive(PinProtocol::Two, &secret.public_key()).unwrap();
+        assert_ne!(
+            shared.encrypt(&[3u8; 16]).unwrap(),
+            shared.encrypt(&[3u8; 16]).unwrap()
+        );
     }
 
     #[test]
     fn malformed_ciphertext_is_refused() {
-        let secret = SecretKey::random(&mut OsRng);
+        let secret = SecretKey::generate();
         for protocol in [PinProtocol::One, PinProtocol::Two] {
-            let shared = Shared::derive(protocol, &secret.public_key());
+            let shared = Shared::derive(protocol, &secret.public_key()).unwrap();
             assert!(shared.decrypt(&[]).is_err());
             assert!(shared.decrypt(&[0u8; 15]).is_err());
             assert!(shared.decrypt(&[0u8; 40]).is_err());
         }
         // Protocol 2: an IV and nothing after it.
-        let shared = Shared::derive(PinProtocol::Two, &secret.public_key());
+        let shared = Shared::derive(PinProtocol::Two, &secret.public_key()).unwrap();
         assert!(shared.decrypt(&[0u8; 16]).is_err());
     }
 

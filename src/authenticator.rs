@@ -447,7 +447,7 @@ impl Authenticator {
 
         let agreement = self.client_pin(protocol, allow::PIN_GET_KEY_AGREEMENT, vec![])?;
         let shared = Shared::from_key_agreement(protocol, &agreement)?;
-        let pin_hash_enc = shared.encrypt(&pin.hash16()[..]);
+        let pin_hash_enc = shared.encrypt(&pin.hash16()[..])?;
         let scoped = info.option("pinUvAuthToken") == Some(true);
         let mut rest = vec![
             (int(0x03), shared.platform_cose.clone()),
@@ -526,6 +526,7 @@ mod tests {
     use crate::transport::tests::FakeHid;
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::{SigningKey, VerifyingKey};
+    use p256::elliptic_curve::Generate;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use zeroize::Zeroizing;
@@ -877,7 +878,7 @@ mod tests {
 
     #[test]
     fn further_credentials_come_from_get_next_assertion() {
-        let second = SigningKey::random(&mut rand_core::OsRng);
+        let second = SigningKey::generate();
         let second_public = *second.verifying_key();
         let mut s = setup(|f| {
             f.credentials.push(Credential {

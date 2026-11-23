@@ -139,6 +139,11 @@ pub enum Error {
     #[error("HID I/O: {0}")]
     Io(String),
 
+    /// The operating system gave no randomness (for a channel nonce, a key
+    /// agreement key or an IV), so nothing was sent.
+    #[error("the operating system gave no randomness: {0}")]
+    Randomness(String),
+
     /// The key answered with a CTAPHID transport error.
     #[error("CTAPHID transport error {code:#04x} ({})", ctaphid_error_name(*.code))]
     Transport {
