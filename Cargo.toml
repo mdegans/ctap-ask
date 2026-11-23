@@ -29,13 +29,14 @@ zeroize = "1"
 # HMAC and AES-256-CBC. RustCrypto only: no OpenSSL, no ring. `p256` 0.14 and
 # the hash crates of its generation; `aes` and `cbc` have no shared types
 # with them and stay on the `cipher` 0.4 line.
-aes = "0.8"
-cbc = "0.1"
+aes = { version = "0.8", features = ["zeroize"] }
+cbc = { version = "0.1", features = ["zeroize"] }
+# hkdf has no zeroize feature of its own; it runs on hmac, which has.
 hkdf = "0.13"
-hmac = "0.13"
+hmac = { version = "0.13", features = ["zeroize"] }
 p256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdh", "std"] }
 getrandom = "0.4"
-sha2 = "0.11"
+sha2 = { version = "0.11", features = ["zeroize"] }
 
 # `verify`
 ed25519-dalek = { version = "3", optional = true }
